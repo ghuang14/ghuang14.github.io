@@ -1,0 +1,17 @@
+<script src="{{ base_path }}/assets/js/main.min.js"></script>
+
+<div style="display: none;">
+  <script type="text/javascript" id="clustrmaps" src="//clustrmaps.com/map_v2.js?d=xZNGuIa3eoDzFDfN9wGxvisllOBI2_sRsM9hVK-l-sU&cl=ffffff&w=a"></script>
+</div>
+
+<script>
+  window.onload = function() {
+    var tracker = document.getElementById('clustrmaps');
+    if (tracker) {
+      tracker.style.display = 'none';
+    }
+  };
+</script>
+
+{% include analytics.html %}
+{% include /comments-providers/scripts.html %}
