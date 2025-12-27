@@ -1,6 +1,6 @@
 ---
 permalink: /
-title: "Gangqi Huang"
+title: ""
 author_profile: true
 redirect_from: 
   - /about/
@@ -10,7 +10,9 @@ redirect_from:
 # About
 
 
-My name is Gangqi (Alex) Huang. I am a second-year PhD student at [University of California, Santa Cruz](https://ucsc.edu), under the supervision of Professor [Yuanchao Xu](https://yuanchaoxu6.github.io/) and Professor [Heiner Litz](https://hlitz.github.io). My research interests include computer systems and computer architecture, with a specific focus on **Architecture Support for CXL** and **Memory Systems**.
+My name is Gangqi Huang. I am a second-year PhD student at [University of California, Santa Cruz](https://ucsc.edu), under the supervision of Professor [Yuanchao Xu](https://yuanchaoxu6.github.io/) and Professor [Heiner Litz](https://hlitz.github.io). My research interests include computer systems and computer architecture, with a specific focus on **Architecture Support for CXL** and **Memory Systems**.
+
+Please feel free to reach out to me by email at alexhuang1403 [at] ucsc [dot] edu.
 
 # Education
 
