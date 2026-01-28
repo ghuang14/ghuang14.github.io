@@ -2,6 +2,7 @@
 
 <div style="display: none;">
   <script type="text/javascript" id="clustrmaps" src="//clustrmaps.com/map_v2.js?d=xZNGuIa3eoDzFDfN9wGxvisllOBI2_sRsM9hVK-l-sU&cl=ffffff&w=a"></script>
+  <script type="text/javascript" id="mapmyvisitors" src="//mapmyvisitors.com/map.js?d=d5vpj65F2uVHoxNJlO8NQzhlTgiPtU27tbuhlVp7py4&cl=ffffff&w=a"></script>
 </div>
 
 <script>
@@ -9,6 +10,10 @@
     var tracker = document.getElementById('clustrmaps');
     if (tracker) {
       tracker.style.display = 'none';
+    }
+    var visitorTracker = document.getElementById('mapmyvisitors');
+    if (visitorTracker) {
+      visitorTracker.style.display = 'none';
     }
   };
 </script>
