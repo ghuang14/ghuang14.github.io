@@ -24,5 +24,10 @@ Please feel free to reach out to me by email at alexhuang1403 [at] ucsc [dot] ed
 
 * **PIPM: Partial and Incremental Page Migration for Multi-host CXL Disaggregated Shared Memory** \
 ***Gangqi Huang***, Heiner Litz, Yuanchao Xu \
-Accepted by ACM International Conference on Architectural Support for Programming Languages and Operating Systems 2026. \
-To appear, 2025.11
+Accepted by ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) 2026. \
+[[ASPLOS26]](/files/pipm2026asplos.pdf), [[NVMW26]](/files/pipm2026nvmw.pdf) 2025.11
+
+* **O3-LSM: Maximizing Disaggregated LSM Write Performance via Three-Layer Offloading** \
+Qi Lin\*, ***Gangqi Huang\****, Te Guo, Chang Guo, Viraj Thakkar, Zichen Zhu, Jianguo Wang, Zhichao Cao \
+Accepted by International Conference on Management of Data (SIGMOD) 2026. \
+To appear, 2026.2
