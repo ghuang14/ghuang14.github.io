@@ -21,6 +21,10 @@ Please feel free to reach out to me by email at alexhuang1403 [at] ucsc [dot] ed
 
 # Publications
 
+* **HYDRA: Hybrid DRAM Caching for Dynamic Complementary Multi-to-One Page Mapping in CXL Tiered Memory** \
+***Gangqi Huang***, Heiner Litz, Yuanchao Xu \
+Accepted by IEEE/ACM International Symposium on Microarchitecture (MICRO) 2026. \
+To appear, 2026.7
 
 * **PIPM: Partial and Incremental Page Migration for Multi-host CXL Disaggregated Shared Memory** \
 ***Gangqi Huang***, Heiner Litz, Yuanchao Xu \
