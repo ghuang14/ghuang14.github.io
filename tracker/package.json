@@ -1,0 +1,16 @@
+{
+  "name": "visitor-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted visitor/IP tracker for ghuang14.github.io, running on Cloudflare Workers + D1",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "db:init": "wrangler d1 execute visitor-tracker --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute visitor-tracker --local --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

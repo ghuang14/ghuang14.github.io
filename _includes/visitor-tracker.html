@@ -1,0 +1,89 @@
+{% comment %}
+  Self-hosted visitor tracker beacon.
+
+  Replaces the old ClustrMaps / MapMyVisitors scripts, which are no longer
+  maintained. Sends one pageview to the Cloudflare Worker in tracker/, which
+  records the client IP plus geo/network data on the server side.
+
+  Configure in _config.yml under `visitor_tracker:`. If `endpoint` is empty,
+  nothing is emitted at all.
+{% endcomment %}
+
+{% if site.visitor_tracker.endpoint and site.visitor_tracker.endpoint != "" and page.visitor_tracker != false %}
+{% assign vt_dnt = true %}{% if site.visitor_tracker.respect_dnt == false %}{% assign vt_dnt = false %}{% endif %}
+<script>
+(function () {
+  var ENDPOINT = "{{ site.visitor_tracker.endpoint }}";
+  var RESPECT_DNT = {{ vt_dnt }};
+
+  /* NOTE: this file is rendered through _layouts/compress.html, which strips
+     newlines and collapses the whole page onto one line. Use only block
+     comments below — a "//" comment would swallow the rest of the script. */
+
+  /* Never count local previews (jekyll serve) as real traffic. */
+  var host = location.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "" || host === "::1") return;
+
+  if (RESPECT_DNT && (navigator.doNotTrack === "1" || window.doNotTrack === "1" ||
+                      navigator.msDoNotTrack === "1" || navigator.globalPrivacyControl)) return;
+
+  /* A random id kept in localStorage lets us tell new visitors from returning
+     ones without relying on the IP alone. Fails open in private-browsing modes. */
+  var vid = "", isNew = false;
+  try {
+    vid = localStorage.getItem("_vt_id") || "";
+    if (!vid) {
+      vid = (crypto.randomUUID ? crypto.randomUUID()
+                               : Date.now().toString(36) + Math.random().toString(36).slice(2));
+      localStorage.setItem("_vt_id", vid);
+      isNew = true;
+    }
+  } catch (e) { /* storage blocked — still record the hit, just without an id */ }
+
+  var payload = JSON.stringify({
+    p: location.pathname + location.search,
+    t: document.title,
+    r: document.referrer,
+    l: navigator.language,
+    s: screen.width + "x" + screen.height,
+    v: vid,
+    n: isNew
+  });
+
+  function send() {
+    /* text/plain keeps this a CORS "simple request" — no preflight round-trip. */
+    try {
+      if (navigator.sendBeacon &&
+          navigator.sendBeacon(ENDPOINT, new Blob([payload], { type: "text/plain;charset=UTF-8" }))) {
+        return;
+      }
+    } catch (e) {}
+
+    try {
+      fetch(ENDPOINT, {
+        method: "POST",
+        body: payload,
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        keepalive: true,
+        mode: "cors",
+        credentials: "omit"
+      }).catch(pixel);
+      return;
+    } catch (e) {}
+
+    pixel();
+  }
+
+  /* Last resort: an <img> request, which needs neither CORS nor fetch(). */
+  function pixel() {
+    var q = "?f=gif&p=" + encodeURIComponent(location.pathname) +
+            "&r=" + encodeURIComponent(document.referrer) +
+            "&v=" + encodeURIComponent(vid) + "&n=" + (isNew ? 1 : 0);
+    new Image().src = ENDPOINT + q;
+  }
+
+  if (document.readyState === "complete") send();
+  else window.addEventListener("load", send, { once: true });
+})();
+</script>
+{% endif %}

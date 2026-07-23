@@ -1,0 +1,33 @@
+name = "visitor-tracker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# The public dashboard/beacon URL ends up as:
+#   https://visitor-tracker.<your-workers-subdomain>.workers.dev
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "visitor-tracker"
+# Replace with the id printed by:  wrangler d1 create visitor-tracker
+database_id = "8f70f1cd-9e4c-4382-a8ca-a47820233d04"
+
+[vars]
+# Comma-separated list of origins allowed to send hits. Blocks people from
+# spamming your endpoint from elsewhere. Leave empty to accept any origin.
+ALLOWED_ORIGINS = "https://ghuang14.github.io"
+
+# "false" stores an anonymised IP (IPv4 -> last octet zeroed, IPv6 -> /48) instead
+# of the full address. Unique-visitor counts keep working either way via ip_hash.
+STORE_FULL_IP = "true"
+
+# Drop rows older than this many days on the scheduled cleanup. 0 = keep forever.
+RETENTION_DAYS = "0"
+
+# Optional: uncomment to run the retention cleanup nightly at 04:00 UTC.
+# [triggers]
+# crons = ["0 4 * * *"]
+
+# Secrets — set these with `wrangler secret put <NAME>`, never in this file:
+#   DASHBOARD_TOKEN  password for /stats, /stats.json and /export.csv
+#   IP_SALT          random string used when hashing IPs

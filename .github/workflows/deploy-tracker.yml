@@ -1,0 +1,71 @@
+name: Deploy visitor tracker
+
+# Deploys the Cloudflare Worker in tracker/ whenever its source changes on
+# master. The Jekyll site itself is built separately by GitHub Pages and is
+# not affected by this workflow.
+#
+# Requires one repository secret: CLOUDFLARE_API_TOKEN
+# (Settings -> Secrets and variables -> Actions -> New repository secret)
+#
+# The token needs BOTH of these account permissions:
+#   Workers Scripts : Edit   (included in the "Edit Cloudflare Workers" template)
+#   D1              : Edit   (NOT in that template - add it manually)
+# Without D1:Edit the schema step fails with "Authentication error [code: 10000]".
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "tracker/**"
+      - ".github/workflows/deploy-tracker.yml"
+  workflow_dispatch: # lets you re-deploy by hand from the Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # wrangler 4.113 requires Node >= 22; the runner's default is older.
+          node-version: 22
+
+      # An unset secret interpolates to an empty string, which otherwise
+      # surfaces as a confusing "non-interactive environment" error from
+      # wrangler. Fail early with something actionable instead.
+      - name: Check setup
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          fail=0
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::error::Repository secret CLOUDFLARE_API_TOKEN is not set. Create an API token at https://dash.cloudflare.com/profile/api-tokens using the 'Edit Cloudflare Workers' template, then add it under Settings -> Secrets and variables -> Actions -> New repository secret."
+            fail=1
+          fi
+          if grep -q 'REPLACE_WITH_YOUR_D1_DATABASE_ID' tracker/wrangler.toml; then
+            echo "::error::tracker/wrangler.toml still has the placeholder database_id. Create the database (wrangler d1 create visitor-tracker, or the D1 section of the Cloudflare dashboard) and commit the real id."
+            fail=1
+          fi
+          exit $fail
+
+      # schema.sql is CREATE ... IF NOT EXISTS throughout, so re-running it on
+      # every deploy is a no-op once the table exists.
+      - name: Apply D1 schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: tracker
+          wranglerVersion: "4.113.0"
+          command: d1 execute visitor-tracker --remote --yes --file=./schema.sql
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: tracker
+          # The action ships its own pinned wrangler (3.x) and ignores the
+          # version in tracker/package.json, so pin v4 here. Must be an exact
+          # version — the action runs semver comparisons on this value. Safe to
+          # bump; check `npm view wrangler version`.
+          wranglerVersion: "4.113.0"
