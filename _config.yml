@@ -73,9 +73,90 @@ social:
 
 # Analytics
 analytics:
-  provider               :  "google-universal" # false (default), "google", "google-universal", "custom"
+  provider               :  false # false (default), "google", "google-universal", "custom"
   google:
     tracking_id          :
+
+
+# Self-hosted request collector (Cloudflare Worker + D1, source in edge/).
+# Replaces the third-party counter widget. Leave `endpoint` empty to disable.
+edge_client:
+  endpoint               : "https://visitor-tracker.alexhuang1403.workers.dev/e"
+  # A second endpoint. Endpoints are RACED, not chained: this one starts
+  # `hedge_ms` after the first unless the first has already answered, and both
+  # carry the same event id so nothing is double-counted.
+  #
+  # Set to the legacy /hit path here because the site and the Worker deploy on
+  # separate pipelines: for the minute or two after a push where GitHub Pages
+  # has rebuilt but the Worker has not, /e is still a 404 and this catches the
+  # requests that would otherwise be lost. Safe to leave in place permanently.
+  fallback_endpoint      : "https://visitor-tracker.alexhuang1403.workers.dev/hit"
+
+  # Additional collectors, each on a DIFFERENT host. This is the only setting
+  # that reaches such a client AT THE TIME OF THE REQUEST — on some networks
+  # *.workers.dev does not resolve, and every URL above lives on that one
+  # hostname, so none of them resolve either and the race has nothing to race
+  # against. A Worker Custom Domain on any zone you control does resolve (the
+  # anycast addresses behind it answer fine; it is the *name* that fails) and
+  # needs no additional registration. A domain is ~$10/yr, and there are
+  # registrars that give you one for nothing — see edge/README.md, which also
+  # covers how to confirm a candidate hostname is actually reachable from those
+  # networks before routing traffic to it.
+  #
+  # MEASURED, not assumed. From a proxy node on one such network:
+  #   200  https://astro.pages.dev/                       pages.dev resolves
+  #   000  https://visitor-tracker...workers.dev/nope     workers.dev does not
+  #   200  https://ghuang14.github.io/                    the site itself
+  # Both names are Cloudflare's and share an anycast network, so what fails is
+  # the NAME. edge/pages/ deploys the same collector, against the same D1
+  # database, to visitor-tracker-cn.pages.dev.
+  #
+  # Uncomment after the first green "Deploy Pages collector" run in Actions —
+  # see the one-time setup in .github/workflows/deploy-edge.yml. Until the
+  # project exists the URL 404s, which costs one hedged request and no data,
+  # but there is no reason to spend it.
+  extra_endpoints        :
+    - "https://visitor-tracker-cn.pages.dev/e"
+
+  # How long to give one host before starting the next, in milliseconds. An
+  # unreachable host usually hangs rather than failing fast, so this — not the
+  # failure handler — is what actually reaches the second collector.
+  hedge_ms               : 1200
+
+  # A request that reached NO endpoint is kept in the browser's localStorage
+  # and retried on a later one — from whatever network the client connects
+  # from next. This is the one mechanism that does not need a second hostname,
+  # so it is what recovers a failed delivery while `extra_endpoints` is still
+  # empty. The retry carries the original event id, so a copy that did land
+  # collapses into it rather than being counted twice, and its own age, so the
+  # row is filed under the date of the original request and not the date it
+  # arrived. Opt-outs are never queued: that setting means nothing is carried
+  # over between sessions.
+  store_and_forward      : true
+  queue_days             : 30 # how long an undelivered request is worth keeping
+  queue_max              : 50 # how many to hold at once; the stalest are shed first
+
+  # Ask the browser to resolve its own public address and send it along.
+  # Without this the only network metadata on record is whatever reached
+  # Cloudflare, which belongs to the mirror or the proxy whenever the site is
+  # not loaded directly — and it is also the ONLY such value a request retried
+  # from the queue can ever carry, since by the time a retry is delivered the
+  # connection belongs to a different network. Runs once per tab, and never
+  # when the client signals DNT/GPC.
+  #
+  # The built-in list was replaced after the previous defaults
+  # (qifu-api.baidubce.com and forge.speedtest.cn) were found to answer 404 and
+  # 405 from every network tested, not only the restricted ones — so this had
+  # been resolving nothing at all for anyone. Every replacement was checked for a
+  # 2xx, a usable Access-Control-Allow-Origin, and an address in the body.
+  # Reachability from inside a restricted network cannot be established from
+  # outside it, so verify through a proxy before relying on the order; a dead
+  # entry costs one lookup and never delays the request.
+  resolve_self      : true
+  echo_endpoints      : []
+
+  respect_optout            : true # honour Do-Not-Track / Global Privacy Control
+  count_optouts          : true # still count those requests anonymously (no metadata, no id)
 
 
 # Site Author
@@ -145,6 +226,7 @@ exclude:
   - node_modules
   - package.json
   - tmp
+  - edge
   - vendor
 keep_files:
   - .git

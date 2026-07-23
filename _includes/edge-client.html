@@ -1,0 +1,655 @@
+{% comment %}
+  Self-hosted request beacon.
+
+  Replaces an earlier third-party script, no longer
+  maintained. Sends one pageview to the Cloudflare Worker in edge/, which
+  records geo/network metadata on the server side.
+
+  Configure in _config.yml under `edge_client:`. If `endpoint` is empty,
+  nothing is emitted at all.
+
+  Delivery design (see edge/README.md "Why the beacon looks like this"):
+
+    * fetch(keepalive) is the PRIMARY transport, not navigator.sendBeacon.
+      EasyPrivacy ships an unqualified `*$ping,third-party` rule, and
+      sendBeacon is typed `ping` by every engine, so it is blocked by default
+      in uBlock Origin and Brave. A keepalive fetch is typed `xmlhttprequest`
+      and is allowed by every list tested.
+    * sendBeacon returns true on *queue*, not on delivery, so it can never be
+      treated as proof of success. It is only used as a fallback, always
+      paired with the <img> pixel.
+    * Endpoints are RACED, not chained. The previous version only tried the
+      second host after the first had *proved* itself dead, which is exactly
+      what an unreachable host never does in time: a name that does not
+      resolve, or a black-holed route, hangs until the TCP timeout, the client
+      has navigated away long before that, and no JavaScript is left running
+      to fail over. A working second host was therefore unusable in practice
+      — the one case the fallback existed for. Now host N+1 starts on a timer
+      whether or not host N has answered, and stops early the moment one
+      succeeds.
+    * Every hit carries a random event id and the Worker inserts OR IGNOREs on
+      it, so firing several transports, or several hosts, at once can never
+      double-count.
+    * The address the client reports for itself is looked up from a small set
+      of echo endpoints picked for wide reachability, and sent along. Where
+      this site is read through a mirror or a proxy, the address that reaches
+      Cloudflare is the mirror's; this is the only thing that recovers the
+      client's own. Skipped entirely for DNT/GPC requests.
+    * The send happens at parse time from <head>, on no event at all. `load`
+      waits on the async MathJax script from cdnjs; DOMContentLoaded waits for
+      the whole document, and this used to sit at the bottom of <body> behind a
+      render-blocking bundle. Both meant a client who left early was never
+      counted — an invisible loss, since it looks like less traffic rather than
+      like an error. A preconnect emitted earlier in <head> means the
+      connection is already open when the request is made.
+    * Every pageview reports its own time-to-send, so a regression back to a
+      late send shows up as a number on the dashboard instead of as people
+      quietly going missing.
+    * A pageview that NO endpoint could deliver is kept in localStorage and
+      replayed on a later one. Racing hosts cannot help when every host is on
+      the same name that does not resolve, which is the situation on some
+      networks; the queue is what turns "lost forever" into "arrives when this
+      client is next on a network that works". The event id rides along, so a
+      hit that did get through after all collapses into the row it already
+      made.
+    * The browser's own IANA timezone is sent. It is the only region signal
+      left once traffic exits a VPN or a mirror somewhere else, and the only
+      one a replayed hit carries at all -- by then the connecting address is
+      whatever network finally worked. Never sent for an opt-out.
+{% endcomment %}
+
+{% if site.edge_client.endpoint and site.edge_client.endpoint != "" and page.edge_client != false %}
+{% assign vt_part = include.part | default: "all" %}
+{% assign vt_dnt = true %}{% if site.edge_client.respect_optout == false %}{% assign vt_dnt = false %}{% endif %}
+{% assign vt_count_optouts = true %}{% if site.edge_client.count_optouts == false %}{% assign vt_count_optouts = false %}{% endif %}
+{% assign vt_resolve_ip = true %}{% if site.edge_client.resolve_self == false %}{% assign vt_resolve_ip = false %}{% endif %}
+{% assign vt_hedge = site.edge_client.hedge_ms | default: 1200 %}
+{% assign vt_queue = true %}{% if site.edge_client.store_and_forward == false %}{% assign vt_queue = false %}{% endif %}
+{% assign vt_queue_days = site.edge_client.queue_days | default: 30 %}
+{% assign vt_queue_max = site.edge_client.queue_max | default: 50 %}
+{% capture vt_endpoints %}"{{ site.edge_client.endpoint }}"{% if site.edge_client.fallback_endpoint and site.edge_client.fallback_endpoint != "" %},"{{ site.edge_client.fallback_endpoint }}"{% endif %}{% for vt_ep in site.edge_client.extra_endpoints %},"{{ vt_ep }}"{% endfor %}{% endcapture %}
+{% capture vt_echo %}{% for vt_ee in site.edge_client.echo_endpoints %}{% unless forloop.first %},{% endunless %}"{{ vt_ee }}"{% endfor %}{% endcapture %}
+{% assign vt_origin = site.edge_client.endpoint | split: "/" | slice: 0, 3 | join: "/" %}
+{% if vt_part == "preconnect" or vt_part == "all" %}
+<link rel="preconnect" href="{{ vt_origin }}" crossorigin>
+<link rel="dns-prefetch" href="{{ vt_origin }}">
+{% for vt_ep in site.edge_client.extra_endpoints %}<link rel="dns-prefetch" href="{{ vt_ep | split: "/" | slice: 0, 3 | join: "/" }}">
+{% endfor %}{% endif %}
+{% if vt_part == "head" or vt_part == "all" %}
+<script>
+(function () {
+  var ENDPOINTS = [{{ vt_endpoints }}];
+  var ECHO = [{{ vt_echo }}];
+  var RESPECT_DNT = {{ vt_dnt }};
+  var COUNT_OPTOUTS = {{ vt_count_optouts }};
+  var RESOLVE_IP = {{ vt_resolve_ip }};
+  var HEDGE = {{ vt_hedge }};
+  var QUEUE = {{ vt_queue }};
+  var QUEUE_DAYS = {{ vt_queue_days }};
+  var QUEUE_MAX = {{ vt_queue_max }};
+
+  /* NOTE: this file is rendered through _layouts/compress.html, which strips
+     newlines and collapses the whole page onto one line. Use only block
+     comments below — a "//" comment would swallow the rest of the script. */
+
+  /* Endpoints on the SAME host share one fate: if the host is unreachable, or
+     its name does not resolve, every one of them is dead. They are still worth
+     keeping (the shipped pair covers the window where the site has redeployed
+     but the Worker has not), but only a genuinely different host can survive a
+     host-level failure. Duplicates are dropped so the hedge timer is not spent
+     on a URL already in flight. */
+  var seen = {}, eps = [];
+  for (var ei = 0; ei < ENDPOINTS.length; ei++) {
+    var u = ENDPOINTS[ei];
+    if (u && !seen[u]) { seen[u] = 1; eps.push(u); }
+  }
+  ENDPOINTS = eps;
+  if (!ENDPOINTS.length) return;
+  if (!(HEDGE > 0)) HEDGE = 1200;
+
+  /* Never count local previews (jekyll serve) as real traffic. */
+  var host = location.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "" || host === "::1") return;
+
+  /* Do-Not-Track / Global Privacy Control. These requests carry nothing that
+     identifies them: no id, no referrer, no title, no user agent, and the
+     Worker keeps no network metadata for them. But they are counted in
+     aggregate, otherwise an entire population (Brave enables GPC for everyone)
+     is indistinguishable from no traffic at all — which is exactly the
+     ambiguity these counts exist to resolve. Set `count_optouts: false` in
+     _config.yml to drop them entirely. */
+  var optedOut = RESPECT_DNT && (navigator.doNotTrack === "1" || window.doNotTrack === "1" ||
+                                 navigator.msDoNotTrack === "1" || !!navigator.globalPrivacyControl);
+  if (optedOut && !COUNT_OPTOUTS) return;
+
+  /* Milliseconds from navigation start to the moment a pageview is handed to
+     the network. The send path is optimised for exactly this number, so it is
+     measured rather than assumed: the dashboard reports its median and p95, and
+     a regression shows up there instead of as visitors quietly going missing. */
+  function since() {
+    try {
+      if (window.performance && typeof performance.now === "function") {
+        return Math.round(performance.now());
+      }
+    } catch (e) {}
+    return -1;
+  }
+
+  function rand() {
+    try {
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+    } catch (e) {}
+    return Date.now().toString(36) + Math.random().toString(36).slice(2) +
+           Math.random().toString(36).slice(2);
+  }
+
+  /* setTimeout is assumed by nothing here: every use goes through these, so a
+     context without timers degrades to "first endpoint only" instead of
+     throwing and losing the hit altogether. */
+  function later(fn, ms) {
+    try { if (typeof setTimeout === "function") return setTimeout(fn, ms); } catch (e) {}
+    return 0;
+  }
+  function cancel(id) {
+    try { if (id && typeof clearTimeout === "function") clearTimeout(id); } catch (e) {}
+  }
+
+  /* A random id kept in localStorage separates first-time clients from
+     returning ones without relying on network metadata. When storage is
+     unavailable (Safari private browsing, storage disabled) we send no id at
+     all rather than a throwaway one — a fresh id every pageview would inflate
+     both the unique and the first-time counts. */
+  var vid = "", isNew = false, storageOk = false;
+  if (!optedOut) {
+    try { vid = localStorage.getItem("_vt_id") || ""; storageOk = true; } catch (e) {}
+    if (!vid) {
+      vid = rand();
+      isNew = true;
+      storageOk = false;
+      try { localStorage.setItem("_vt_id", vid); storageOk = true; } catch (e) {}
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* timezone reported by the browser                                 */
+  /* ---------------------------------------------------------------- */
+  /* Cloudflare infers a timezone from the connecting address, which is the
+     exit node's whenever the site is read through a VPN, a mirror or a proxy
+     — the ordinary way it is read on the networks the fallbacks exist for.
+     The browser's own IANA zone comes from the client instead. The two
+     disagreeing is the clearest sign there is that traffic does not exit
+     where it originates, and for a hit replayed from the queue below it is
+     the only region signal left, because by then the connecting address
+     belongs to whatever network finally worked. Not collected for
+     opt-outs. */
+  var TZ = "", TZO = 0;
+  if (!optedOut) {
+    try { TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+    try { TZO = -new Date().getTimezoneOffset(); } catch (e) {}
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* store and forward                                                 */
+  /* ---------------------------------------------------------------- */
+  /* Racing endpoints recovers a pageview whose *first* host is unreachable.
+     It can do nothing at all when every host is unreachable, which is the
+     whole situation on a network where the collector's name does not resolve:
+     the race has nothing to race against and the pageview is lost the moment
+     the tab closes.
+
+     So a pageview nothing could deliver is written to localStorage instead of
+     being dropped, and replayed on a later one — after a VPN goes on, after
+     the client moves, after the outage clears, or simply from the next network
+     the site is read on. It keeps its original event id, so if a transport did
+     quietly land after all the replay collapses into the row it already made
+     rather than counting twice; and it carries its own age, so the Worker
+     files it on the day it happened instead of the day it arrived.
+
+     Opt-outs are never queued. They are the one population that has asked not
+     to be carried between sessions, and a queue is a thing that persists. */
+  var QKEY = "_vt_q";
+  var QTTL = (QUEUE_DAYS > 0 ? QUEUE_DAYS : 30) * 86400000;
+  var QMAX = QUEUE_MAX > 0 ? QUEUE_MAX : 50;
+  var canQueue = QUEUE && !optedOut && storageOk;
+  var PENDING = null;
+
+  function qread() {
+    if (!canQueue) return [];
+    var raw = "";
+    try { raw = localStorage.getItem(QKEY) || ""; } catch (e) { return []; }
+    var a = null;
+    try { a = JSON.parse(raw); } catch (e) {}
+    if (!a || typeof a.length !== "number") return [];
+    /* Anything past its shelf life is dropped on read rather than sent: a
+       months-old pageview is not worth the request, and expiring here means
+       the cap below is never spent holding rows that will never go. */
+    var cut = Date.now() - QTTL, out = [];
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] && a[i].e && a[i].t > cut) out.push(a[i]);
+    }
+    return out;
+  }
+
+  function qwrite(list) {
+    if (!canQueue) return;
+    /* Newest first, so the cap sheds the stalest entries and not the ones
+       most likely still to be wanted. */
+    try { localStorage.setItem(QKEY, JSON.stringify(list.slice(0, QMAX))); } catch (e) {}
+  }
+
+  function qadd(ev) {
+    if (!canQueue || !ev || ev.d) return;
+    var list = qread();
+    for (var i = 0; i < list.length; i++) if (list[i].e === ev.e) return;
+    var copy;
+    try { copy = JSON.parse(JSON.stringify(ev)); } catch (e) { return; }
+    copy.q = 1;
+    list.unshift(copy);
+    qwrite(list);
+  }
+
+  function qdrop(eid) {
+    if (!canQueue) return;
+    var list = qread(), out = [];
+    for (var i = 0; i < list.length; i++) if (list[i].e !== eid) out.push(list[i]);
+    qwrite(out);
+  }
+
+  /* Called from every path that can conclude the pageview is not going to be
+     delivered: the last endpoint failing, and the tab going away while it is
+     still in flight. Idempotent — qadd() ignores an id it already holds. */
+  function park() {
+    if (PENDING) qadd(PENDING);
+  }
+
+  /* The echo lookup usually finishes after the pageview has already been sent,
+     and on a slow network it can finish after the pageview has already been
+     parked. Either way the address belongs to the pageview in progress, so it
+     is written onto the pending event and onto its stored copy if there is
+     one. */
+  function stamp(ip) {
+    if (!PENDING || PENDING.d || PENDING.ci) return;
+    PENDING.ci = ip;
+    if (!canQueue) return;
+    var list = qread(), changed = false;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].e === PENDING.e && !list[i].ci) { list[i].ci = ip; changed = true; }
+    }
+    if (changed) qwrite(list);
+  }
+
+  var flushed = false;
+  function flush(url) {
+    if (!canQueue || flushed || typeof fetch !== "function") return;
+    flushed = true;
+    var list = qread();
+    /* A few at a time: a client returning after a long outage should not open
+       twenty connections at once, and whatever is left simply goes on the next
+       pageview. */
+    for (var i = 0; i < list.length && i < 8; i++) replay(url, list[i]);
+  }
+
+  function replay(url, ev) {
+    var eid = ev.e, p;
+    try {
+      p = fetch(url, {
+        method: "POST",
+        body: payload(ev, false),
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        keepalive: true, mode: "cors", credentials: "omit", cache: "no-store"
+      });
+    } catch (e) { return; }
+    if (!p || typeof p.then !== "function") return;
+    /* Only a confirmed 2xx clears an entry. A replay that fails stays queued
+       for the next pageview, which is the entire point of it. */
+    p.then(function (res) { if (res && res.ok) qdrop(eid); }, function () {});
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* the address the client reports for itself                        */
+  /* ---------------------------------------------------------------- */
+  /* CF-Connecting-IP is the address that reached Cloudflare, which is the
+     client's own only when the client talked to Cloudflare directly. Read
+     through a mirror, a reverse proxy or a corporate gateway — the ordinary
+     way this site is reached on the networks the fallbacks exist for — it is
+     the middlebox's address, and every row lands on the same handful of
+     addresses in the wrong city. Asking the browser itself is the only way to
+     see past that.
+
+     The lookup is fire-and-forget, never blocks the pageview, is tried at most
+     once per tab (sessionStorage), and is skipped completely for opt-outs. */
+  /* Every one of these was checked for three things, because the previous list
+     failed all of them silently: it answers 2xx, it sends an
+     Access-Control-Allow-Origin the browser will accept, and the body actually
+     contains an address. The old defaults —
+     qifu-api.baidubce.com/ip/local/geo/v1/district and
+     forge.speedtest.cn/api/location/info — now answer 404 and 405 from
+     everywhere, not just from the networks this list is ordered for, so
+     `resolve_self` had been resolving nothing for anyone.
+
+     Ordered most-widely-reachable first, since the list is walked one at a
+     time and the first usable answer wins. Some networks reach only a subset
+     of these services, and whether a given one answers from such a network
+     cannot be established from outside it — verify with `echo_endpoints` and
+     a proxy before relying on any of them. A service
+     that goes the same way as the last two costs a lookup and nothing else:
+     a failed echo never delays or blocks the pageview. */
+  /* Measured through a proxy node on one of those networks, not guessed. From
+     there: zxinc answered 200 with the client's own address (a regional carrier
+     address), bigdatacloud answered 200, and ipwho.is and ipify both timed out
+     — as did the two that used to be the defaults here, which additionally
+     answer 404 and 405 from everywhere and so had been resolving nothing for
+     anybody.
+
+     Order is load-bearing: the list is walked one at a time and the first usable
+     answer wins, so the two that answer from there come first and the rest are
+     there for everyone else. Re-check with a proxy if this stops
+     producing addresses; a dead entry costs one lookup and never delays a
+     pageview. */
+  var DEFAULT_ECHO = [
+    "https://ip.zxinc.org/api.php?type=json",
+    "https://api.bigdatacloud.net/data/client-ip",
+    "https://ipwho.is/",
+    "https://api64.ipify.org?format=json"
+  ];
+  var CLIENT_IP = "", IP_SENT = false, WON = "", LAST_EID = "";
+  if (!ECHO.length) ECHO = DEFAULT_ECHO;
+
+  try { CLIENT_IP = sessionStorage.getItem("_vt_ip") || ""; } catch (e) {}
+
+  /* The echo services answer with different JSON shapes and some with plain
+     text, so the address is pulled out by pattern rather than by key. Anything
+     that is not a public address is rejected again on the server. */
+  function ipIn(text) {
+    var s = String(text || "");
+    var m = s.match(/(?:^|[^0-9.])((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?![0-9.])/);
+    if (m) return m[1];
+    m = s.match(/\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/i);
+    return m ? m[0] : "";
+  }
+
+  function resolveIp() {
+    if (CLIENT_IP || optedOut || !RESOLVE_IP || typeof fetch !== "function") return;
+    var i = 0;
+    /* One at a time, each given HEDGE ms: three parallel third-party requests
+       on every pageview would be a worse trade than one that usually works. */
+    function step() {
+      if (CLIENT_IP || i >= ECHO.length) return;
+      var url = ECHO[i++], done = false;
+      var timer = later(function () { if (!done) { done = true; step(); } }, HEDGE);
+      var p;
+      try {
+        p = fetch(url, { mode: "cors", credentials: "omit", cache: "no-store" });
+      } catch (e) { cancel(timer); step(); return; }
+      if (!p || typeof p.then !== "function") { cancel(timer); step(); return; }
+      p.then(function (res) { return res && res.ok ? res.text() : ""; })
+       .then(function (text) {
+         if (done) return;
+         done = true; cancel(timer);
+         var ip = ipIn(text);
+         if (!ip) { step(); return; }
+         CLIENT_IP = ip;
+         try { sessionStorage.setItem("_vt_ip", ip); } catch (e) {}
+         stamp(ip);
+         enrich();
+       }, function () { if (!done) { done = true; cancel(timer); step(); } });
+    }
+    step();
+  }
+
+  /* The pageview is never delayed for the lookup. When the address arrives
+     after the hit has already landed, it is filled in with a follow-up ping
+     that carries the same event id and creates no second row. */
+  function enrich() {
+    if (!CLIENT_IP || IP_SENT || !WON || !LAST_EID || typeof fetch !== "function") return;
+    IP_SENT = true;
+    try {
+      fetch(WON, {
+        method: "POST",
+        body: JSON.stringify({ e: LAST_EID, ci: CLIENT_IP, x: 1 }),
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        keepalive: true, mode: "cors", credentials: "omit", cache: "no-store"
+      }).then(function () {}, function () {});
+    } catch (e) {}
+  }
+
+  /* One pageview, in the single form it is both sent and — when nothing could
+     send it — stored in. Everything the Worker needs is here, so a hit
+     replayed days later says exactly what the original would have said. */
+  function event(kind) {
+    if (optedOut) return { e: rand(), d: 1, p: location.pathname, k: kind };
+    return {
+      e: rand(),
+      t: Date.now(),
+      p: location.pathname + location.search,
+      ti: document.title,
+      r: document.referrer,
+      l: navigator.language,
+      s: screen.width + "x" + screen.height,
+      v: storageOk ? vid : "",
+      n: storageOk && isNew ? 1 : 0,
+      k: kind,
+      z: TZ,
+      o: TZO,
+      /* Filled in by stamp() if the lookup lands before the tab goes away, and
+         already present on every pageview after the first in a tab. */
+      ci: CLIENT_IP || "",
+      f: 0,
+      dt: since()
+    };
+  }
+
+  function payload(ev, dropTitle) {
+    if (ev.d) {
+      return JSON.stringify({ e: ev.e, d: 1, p: ev.p, k: ev.k });
+    }
+    var o = {
+      e: ev.e,
+      p: ev.p,
+      t: dropTitle ? "" : ev.ti,
+      r: ev.r,
+      l: ev.l,
+      s: ev.s,
+      v: ev.v,
+      n: ev.n,
+      k: ev.k,
+      tz: ev.z,
+      tzo: ev.o,
+      f: ev.f,
+      dt: ev.dt
+    };
+    if (ev.q) {
+      /* An age, not a wall-clock timestamp: the two machines need not agree
+         on the clock, and the elapsed time is what the Worker needs to file
+         the row on the day the pageview happened. Only ever set on a replay,
+         so a live hit can never be backdated. */
+      o.qt = Math.max(0, Date.now() - ev.t);
+      /* The address the browser found for ITSELF while the pageview was
+         happening, carried through the queue. This is the only way a pageview
+         from a network where no endpoint is reachable ever yields an address at
+         all: by the time a replay can be delivered the connecting address
+         belongs to whatever network finally worked, and the original is gone
+         unless it was captured then and kept. Sending the current one instead
+         would be worse than sending none — it would put the wrong address on
+         the row and look right. */
+      if (ev.ci) o.ci = ev.ci;
+    } else if (CLIENT_IP) {
+      /* Known before the hit went out (a second pageview in the same tab), so
+         no follow-up ping is needed at all. */
+      o.ci = CLIENT_IP;
+      IP_SENT = true;
+    }
+    return JSON.stringify(o);
+  }
+
+  /* One pageview, several hosts, raced rather than chained. Host 0 goes at
+     once; host N starts HEDGE*N ms later unless something has already
+     succeeded, and a host that fails outright escalates immediately instead of
+     waiting for its timer. The Worker de-duplicates on the event id, so the
+     overlap costs a request and never a wrong number. */
+  function deliver(ev) {
+    var settled = false, timers = [], started = [], launched = 0, dead = 0;
+
+    function win(url) {
+      if (settled) return;
+      settled = true;
+      WON = url;
+      PENDING = null;
+      for (var i = 0; i < timers.length; i++) cancel(timers[i]);
+      timers.length = 0;
+      /* If an earlier transport had already given up and parked this hit, the
+         copy on disk is now redundant — and the backlog can go out on the
+         host that has just proved itself reachable. */
+      qdrop(ev.e);
+      enrich();
+      flush(url);
+    }
+    function lost() {
+      ev.f++;
+      dead++;
+      /* Every endpoint that was started has failed and there are none left to
+         start. Nothing further is coming, so keep the pageview for a later
+         one to carry rather than dropping it. */
+      if (!settled && launched >= ENDPOINTS.length && dead >= launched) park();
+    }
+    function start(i) {
+      if (settled || i >= ENDPOINTS.length || started[i]) return;
+      started[i] = 1;
+      launched++;
+      attempt(ENDPOINTS[i], ev, win, function () { lost(); start(i + 1); });
+    }
+    for (var j = 1; j < ENDPOINTS.length; j++) {
+      timers.push((function (k) { return later(function () { start(k); }, HEDGE * k); })(j));
+    }
+    start(0);
+  }
+
+  function attempt(url, ev, onOk, onFail) {
+    var data = payload(ev, false);
+    var p = null;
+    try {
+      p = fetch(url, {
+        method: "POST",
+        body: data,
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        keepalive: true,
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        /* Fetch Priority: without it a keepalive fetch issued during head
+           parsing is queued behind the stylesheet and scripts the parser is
+           already asking for. Ignored by engines that do not implement it. */
+        priority: "high"
+      });
+    } catch (e) { p = null; }
+
+    if (p && typeof p.then === "function") {
+      p.then(function (res) {
+        /* A 403 from the origin allowlist resolves like any other response, so
+           the status has to be inspected explicitly. */
+        if (res && res.ok) { onOk(url); return; }
+        onFail();
+        fallback(url, ev, onOk, null);
+      }, function () {
+        onFail();
+        fallback(url, ev, onOk, null);
+      });
+      return;
+    }
+    /* No usable fetch at all: the pixel's onerror is then the only failure
+       signal there is, so escalation hangs off it rather than firing blind. */
+    fallback(url, ev, onOk, onFail);
+  }
+
+  /* sendBeacon and the pixel are fired together: sendBeacon cannot report
+     delivery, and the pixel can (onerror). The Worker de-duplicates on the
+     event id, so at most one row is ever written. */
+  function fallback(url, ev, onOk, next) {
+    var data = payload(ev, false);
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, new Blob([data], { type: "text/plain;charset=UTF-8" }));
+      }
+    } catch (e) {}
+    pixel(url, ev, onOk, next);
+  }
+
+  /* Last resort: an <img> GET, which needs neither CORS nor fetch(), and which
+     no filter list types as `ping`. onerror is the only honest delivery signal
+     any of the three transports gives us. */
+  var pending = [];
+  function pixel(url, ev, onOk, next) {
+    var q = encodeURIComponent(payload(ev, false));
+    if (q.length > 1400) q = encodeURIComponent(payload(ev, true));
+    var img = new Image();
+    /* Hold a reference so the request cannot be cut short by GC. */
+    pending.push(img);
+    var done = function () {
+      var i = pending.indexOf(img);
+      if (i > -1) pending.splice(i, 1);
+    };
+    /* A pixel that loads is the only success signal a fetch-less client, or
+       one whose fetch is filtered, ever gives us, so it is also what unblocks
+       the follow-up that carries the address, clears any parked copy of this
+       hit, and releases the backlog. */
+    img.onload = function () { done(); if (onOk) onOk(url); };
+    img.onerror = function () { done(); if (next) next(); };
+    img.src = url + (url.indexOf("?") < 0 ? "?" : "&") + "f=gif&z=" + q;
+  }
+
+  var sent = false;
+
+  function record(kind) {
+    if (sent) return;
+    sent = true;
+    var ev = event(kind);
+    LAST_EID = ev.e;
+    PENDING = ev;
+    deliver(ev);
+  }
+
+  /* Sent NOW, while the head is still parsing — not on `load`, and no longer
+     on DOMContentLoaded either.
+
+     `load` was the original bug: it waits on every subresource, including the
+     async MathJax bundle from cdnjs. Moving to DOMContentLoaded fixed that and
+     was still far later than necessary, because this script also sat at the
+     very bottom of <body>, directly beneath a render-blocking main.min.js. The
+     first byte of a pageview therefore went out only after main.min.js had been
+     fetched and executed, the remaining ~70% of the document had been parsed,
+     and a cold DNS+TCP+TLS handshake to a third-party host had completed. Every
+     visitor who closed the tab inside that window was lost — and on a slow or
+     distant network that window is most of the visit.
+
+     Nothing here needs a parsed DOM. Path, referrer, language, screen and the
+     stored id are all available at once, and the include is placed after
+     <title> so document.title is too. The preconnect emitted alongside it has
+     already opened the connection this request rides on. */
+  record("load");
+
+  /* Only once the pageview is on the wire. This is a THIRD-PARTY request, and
+     issuing it first — as this did — put a DNS lookup, a TLS handshake and a
+     connection slot in front of the very hit it exists to annotate. */
+  resolveIp();
+
+  /* Backstops, in case the script itself was parsed after the DOM event. */
+  /* These also park an undelivered hit. An unreachable host does not refuse a
+     connection, it hangs, so on the networks this exists for the tab going
+     away is the only "it failed" signal that ever arrives — and localStorage
+     is still writable at this point, where a network request is not. */
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") { record("hidden"); park(); }
+  });
+  window.addEventListener("pagehide", function () { record("pagehide"); park(); });
+
+  /* A back/forward-cache restore is a real pageview that no load event sees. */
+  window.addEventListener("pageshow", function (e) {
+    if (e && e.persisted) { sent = false; IP_SENT = false; record("bfcache"); }
+  });
+})();
+</script>
+{% endif %}
+{% if vt_part == "body" or vt_part == "all" %}
+<noscript><img src="{{ site.edge_client.endpoint }}?f=gif&amp;k=nojs&amp;p={{ page.url | default: '/' | url_encode }}" alt="" width="1" height="1" style="position:absolute;left:-9999px;width:1px;height:1px"></noscript>
+{% endif %}
+{% endif %}

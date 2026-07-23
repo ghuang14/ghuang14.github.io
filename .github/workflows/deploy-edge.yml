@@ -1,0 +1,176 @@
+name: Deploy edge services
+
+# Deploys the Cloudflare Workers in edge/ whenever their source changes on
+# master. The Jekyll site itself is built separately by GitHub Pages and is not
+# affected by this workflow. What each service does, and why there are two
+# entrypoints, is documented in edge/README.md.
+#
+# Requires one repository secret: CLOUDFLARE_API_TOKEN
+# (Settings -> Secrets and variables -> Actions -> New repository secret)
+#
+# The token needs THREE account permissions:
+#   Workers Scripts    : Edit   (included in the "Edit Cloudflare Workers" template)
+#   D1                 : Edit   (NOT in that template - add it manually)
+#   Cloudflare Pages   : Edit   (NOT in that template either - for the second
+#                                deployment; without it that step fails with
+#                                "Authentication error [code: 10000]")
+# Without D1:Edit the schema step fails the same way.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "edge/**"
+      - "_includes/edge-client.html"
+      - ".github/workflows/deploy-edge.yml"
+  workflow_dispatch: # lets you re-deploy by hand from the Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # wrangler 4.113 requires Node >= 22; the runner's default is older.
+          node-version: 22
+
+      # An unset secret interpolates to an empty string, which otherwise
+      # surfaces as a confusing "non-interactive environment" error from
+      # wrangler. Fail early with something actionable instead.
+      - name: Check setup
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          fail=0
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::error::Repository secret CLOUDFLARE_API_TOKEN is not set. Create an API token at https://dash.cloudflare.com/profile/api-tokens using the 'Edit Cloudflare Workers' template, then add it under Settings -> Secrets and variables -> Actions -> New repository secret."
+            fail=1
+          fi
+          if grep -q 'REPLACE_WITH_YOUR_D1_DATABASE_ID' edge/wrangler.toml; then
+            echo "::error::edge/wrangler.toml still has the placeholder database_id. Create the D1 database and commit its real id; see edge/README.md."
+            fail=1
+          fi
+          exit $fail
+
+      # Runs the Worker and the site's client script against a real SQLite and
+      # a stubbed DOM. No wrangler and no network needed, so a regression is
+      # caught before anything reaches production.
+      - name: Test
+        working-directory: edge
+        run: npm test
+
+      # This runs on every push, BEFORE the Worker is deployed, and against the
+      # table that is already there — so nothing in schema.sql may name a column
+      # the live table does not have yet. Both the added columns and the
+      # idx_visits_event index are therefore applied lazily by the Worker
+      # instead (see LATE_COLUMNS and runMigration in src/index.js). Putting
+      # either here would fail with "no such column", take this step down, and
+      # deadlock: the Worker that adds the column is what never ships. The rest
+      # of the file is CREATE ... IF NOT EXISTS, so re-running it is a no-op.
+      # edge/test/worker.test.mjs section 13 guards this.
+      - name: Apply database schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: edge
+          wranglerVersion: "4.113.0"
+          command: d1 execute visitor-tracker --remote --yes --file=./schema.sql
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: edge
+          # The action ships its own pinned wrangler (3.x) and ignores the
+          # version in edge/package.json, so pin v4 here. Must be an exact
+          # version — the action runs semver comparisons on this value. Safe to
+          # bump; check `npm view wrangler version`.
+          wranglerVersion: "4.113.0"
+
+      # A second deployment of the same code on a different hostname, used as
+      # a fallback for clients that cannot reach the primary one. Details are
+      # in edge/README.md.
+      #
+      # One-time setup, or this step fails with "project not found":
+      #   1. Create the Pages project, EITHER in the dashboard:
+      #        Workers & Pages -> Create application -> Get started
+      #        -> Drag and drop your files -> name it `visitor-tracker-cn`
+      #      OR from a terminal:
+      #        npx wrangler pages project create visitor-tracker-cn \
+      #          --production-branch=master
+      #      Do not drop --production-branch: wrangler 4.x otherwise redirects
+      #      `pages project create` and `pages deploy` to Workers when it finds
+      #      an AI coding agent installed in $HOME, which puts the deployment on
+      #      a workers.dev hostname instead of the pages.dev one this step
+      #      targets. CI is unaffected.
+      #   2. Project -> Settings -> Builds & deployments -> Production branch
+      #      -> `master`. wrangler decides production vs preview with
+      #      `project.production_branch === branch`; mismatch means every upload
+      #      lands on a per-commit preview while the real hostname keeps serving
+      #      whatever was uploaded by hand, with this step reporting success.
+      #   3. Project -> Settings -> Variables and secrets -> IP_SALT, set to the
+      #      SAME value as the Worker's. A different value makes the two
+      #      deployments derive different keys for the same client, silently
+      #      splitting every total between them.
+      #   4. Add "Account | Cloudflare Pages | Edit" to the Cloudflare API token
+      #      (the credential at dash.cloudflare.com/profile/api-tokens, not the
+      #      GitHub secret that holds it; editing it in place does not change
+      #      its value, so the GitHub secret needs no update).
+      - name: Build secondary entrypoint
+        working-directory: edge/pages
+        run: |
+          cp ../src/index.js public/_worker.js
+          echo "_worker.js is $(wc -c < public/_worker.js) bytes"
+          grep -q 'export default' public/_worker.js || { echo "::error::_worker.js has no default export"; exit 1; }
+
+      - name: Deploy secondary endpoint
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: edge/pages
+          wranglerVersion: "4.113.0"
+          # --branch is not optional here. wrangler decides production vs
+          # preview with `isProduction = project.production_branch === branch`,
+          # and when no --branch is given it takes one from
+          # `git rev-parse --abbrev-ref HEAD`. So a project whose production
+          # branch is not `master` — the default for one created through the
+          # dashboard — gets a PREVIEW deployment at a per-commit URL while
+          # the project's production pages.dev hostname keeps serving whatever
+          # was uploaded by hand, and the step still reports success. A
+          # detached checkout is the same story: the detected branch is then
+          # literally "HEAD".
+          #
+          # Passing it explicitly makes the outcome deterministic, provided the
+          # project's production branch is also `master`
+          # (project -> Settings -> Builds & deployments -> Production branch).
+          command: pages deploy --project-name=visitor-tracker-cn --branch=master
+
+      # A delegated deployment lands on workers.dev and still reports success,
+      # which would leave the endpoint on a hostname the site does not call,
+      # while every green tick said otherwise. The Worker answers an unknown
+      # path with exactly "Not found" / 404, so that response from the pages.dev
+      # name is proof that this code is serving this host.
+      - name: Verify secondary endpoint
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PROJECT: visitor-tracker-cn
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /tmp/pb -w '%{http_code}' --max-time 20 \
+                   "https://$PROJECT.pages.dev/nope" || echo 000)
+            body=$(cat /tmp/pb 2>/dev/null || true)
+            if [ "$code" = "404" ] && [ "$body" = "Not found" ]; then
+              echo "secondary endpoint is live"
+              exit 0
+            fi
+            echo "attempt $i: code=$code body=$(printf '%.60s' "$body") - retrying"
+            sleep 10
+          done
+          echo "::error::Secondary endpoint did not answer as expected. Most likely the upload"
+          echo "landed on a preview rather than production: wrangler compares the project's"
+          echo "production branch against --branch, and they must both be 'master'. See"
+          echo "edge/README.md. Recent deployments:"
+          npx --yes wrangler@4.113.0 pages deployment list --project-name="$PROJECT" || true
+          exit 1

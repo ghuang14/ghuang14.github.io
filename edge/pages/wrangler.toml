@@ -1,0 +1,49 @@
+# Second endpoint: identical code, different hostname.
+#
+# `workers.dev` does not resolve on some networks — the name fails to connect
+# there (no DNS answer, and the TLS handshake is reset on the SNI). `pages.dev`
+# is reachable: measured from a node on one of those networks, astro.pages.dev
+# answers 200 while the workers.dev endpoint times out. Both names are
+# Cloudflare's and resolve to the same anycast network, so it is the name alone
+# that fails, nothing else. That makes this the one fallback host that costs
+# nothing and needs no domain and no registration paperwork.
+#
+# It binds the SAME D1 database, so a request recorded here is a row in the same
+# table as every other request — not a second dataset to reconcile. The client
+# races both hosts and both carry the same event id, so whichever wins, the
+# other collapses into it.
+
+# The deploy copies ../src/index.js to public/_worker.js first. Pages "advanced
+# mode" runs that single file for every request, so there is no functions/
+# directory, no bundler and no route generation between this repo and the
+# fallback hostname. The previous functions/[[path]].js layout deployed assets
+# with no Worker at all — every path answered 200 with the static placeholder
+# instead of the endpoint.
+name = "visitor-tracker-cn"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "visitor-tracker"
+# Must be the SAME database as ../wrangler.toml, or the two endpoints write to
+# two different tables and every figure is split between them.
+database_id = "8f70f1cd-9e4c-4382-a8ca-a47820233d04"
+
+[vars]
+ALLOWED_ORIGINS = "https://ghuang14.github.io"
+MIRROR_ORIGINS = ""
+PROFILE_UNVERIFIED = "true"
+STORE_FULL_IP = "true"
+RETENTION_DAYS = "0"
+
+# Secrets, set on the PAGES project (not the Worker) under
+# Settings -> Variables and secrets:
+#
+#   IP_SALT          MUST be byte-identical to the Worker's. It is the salt for
+#                    ip_hash, so a different value re-buckets everything that
+#                    arrives here and the same client is counted twice — once
+#                    per endpoint. This is the one setting that silently
+#                    corrupts the numbers rather than failing loudly.
+#   DASHBOARD_TOKEN  only needed if you want /stats served from this host too;
+#                    the client does not use it.

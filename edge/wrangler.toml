@@ -1,0 +1,52 @@
+name = "visitor-tracker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# The public dashboard/endpoint URL ends up as:
+#   https://visitor-tracker.<your-workers-subdomain>.workers.dev
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "visitor-tracker"
+# Replace with the id printed by:  wrangler d1 create visitor-tracker
+database_id = "8f70f1cd-9e4c-4382-a8ca-a47820233d04"
+
+[vars]
+# Comma-separated list of origins. A request presenting a FOREIGN origin is
+# rejected with 403 unless it matches MIRROR_ORIGINS below. A request presenting
+# NEITHER Origin nor Referer is not rejected: it is recorded and flagged
+# origin_missing, because that is also what a legitimate pixel fallback from a
+# referrer-stripping browser looks like — and those browsers account for much of
+# the traffic that arrives over the fallback endpoint. This is not
+# authentication: a script can set any header. Empty = accept anything.
+ALLOWED_ORIGINS = "https://ghuang14.github.io"
+
+# Extra origins that are also this site: a mirror, a reverse proxy, a staging
+# copy. Exact origins or wildcards ("https://*.mirror.example"). Requests from
+# them are recorded in full, with the host kept in `origin_host` so a mirror can
+# be told apart from the site itself. Everything not listed here is still a 403.
+MIRROR_ORIGINS = ""
+
+# "false" goes back to storing NO connecting address for a request that arrived
+# without an Origin or a Referer. The default records it — with the fields the
+# page volunteered still dropped, and the row still held out of every trusted
+# figure — because blanking it discards most of what arrives over the fallback
+# endpoint.
+PROFILE_UNVERIFIED = "true"
+
+# "false" stores a truncated address (IPv4 -> last octet zeroed, IPv6 -> /48)
+# instead of the full one. Distinct-client counts keep working either way via
+# ip_hash.
+STORE_FULL_IP = "true"
+
+# Drop rows older than this many days on the scheduled cleanup. 0 = keep forever.
+RETENTION_DAYS = "0"
+
+# Optional: uncomment to run the retention cleanup nightly at 04:00 UTC.
+# [triggers]
+# crons = ["0 4 * * *"]
+
+# Secrets — set these with `wrangler secret put <NAME>`, never in this file:
+#   DASHBOARD_TOKEN  password for /stats, /stats.json and /export.csv
+#   IP_SALT          random string mixed in when hashing the connecting address

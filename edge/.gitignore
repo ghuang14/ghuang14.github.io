@@ -1,0 +1,14 @@
+node_modules/
+.wrangler/
+.dev.vars
+package-lock.json
+
+# Generated at deploy time from ../src/index.js; committing it would let the
+# copy drift from the collector it is supposed to be.
+pages/public/_worker.js
+
+# Local-only design notes: the reasoning that is deliberately not in the
+# public repository. Keep this file; it is why a future change does not
+# silently undo the delivery design.
+DESIGN.local.md
+*.local.md

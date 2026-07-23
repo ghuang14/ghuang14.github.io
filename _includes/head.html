@@ -2,7 +2,23 @@
 
 <meta charset="utf-8">
 
+{% comment %}
+  Split deliberately across two points in <head>.
+
+  The preconnect goes as early as the charset allows, so DNS, TCP and TLS to
+  the collector run concurrently with parsing the rest of the document instead
+  of being paid for serially at send time.
+
+  The beacon itself goes after seo.html, because that is what emits <title> and
+  the beacon reads document.title. It used to live at the bottom of <body>,
+  behind a render-blocking script and a full parse; a visitor who left before
+  all of that finished was never recorded. See _includes/edge-client.html.
+{% endcomment %}
+{% include edge-client.html part="preconnect" %}
+
 {% include seo.html %}
+
+{% include edge-client.html part="head" %}
 
 <link href="{% if site.atom_feed.path %}{{ site.atom_feed.path }}{% else %}{{ base_path }}/feed.xml{% endif %}" type="application/atom+xml" rel="alternate" title="{{ site.title }} Feed">
 
