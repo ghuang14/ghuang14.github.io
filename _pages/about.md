@@ -16,15 +16,16 @@ Please feel free to reach out to me by email at alexhuang1403 [at] ucsc [dot] ed
 
 # Education
 
-- **Sept. 2024 - Present.** PhD in Computer Science, University of California, Santa Cruz, Santa Cruz, California.
-- **Sept. 2020 - June. 2024.** Bachelor of Engineering, Information Security, Huazhong University of Science and Technology, Wuhan, China.
+- **Sep. 2024 - Present.** PhD in Computer Science, University of California, Santa Cruz, Santa Cruz, California, US.
+- **Sep. 2024 - Jun. 2026.** MS in Computer Science, University of California, Santa Cruz, Santa Cruz, California, US.
+- **Sep. 2020 - Jun. 2024.** Bachelor of Engineering, Cyber Science and Engineering, Huazhong University of Science and Technology, Wuhan, China.
 
 # Publications
 
 * **HYDRA: Hybrid DRAM Caching for Dynamic Complementary Multi-to-One Page Mapping in CXL Tiered Memory** \
 ***Gangqi Huang***, Heiner Litz, Yuanchao Xu \
 Accepted by IEEE/ACM International Symposium on Microarchitecture (MICRO) 2026. \
-To appear, 2026.7
+[[Preprint]](/files/hydra2026micro.pdf), 2026.7
 
 * **PIPM: Partial and Incremental Page Migration for Multi-host CXL Disaggregated Shared Memory** \
 ***Gangqi Huang***, Heiner Litz, Yuanchao Xu \
@@ -32,6 +33,6 @@ Accepted by ACM International Conference on Architectural Support for Programmin
 [[ASPLOS26]](/files/pipm2026asplos.pdf), [[NVMW26]](/files/pipm2026nvmw.pdf) 2025.11
 
 * **O3-LSM: Maximizing Disaggregated LSM Write Performance via Three-Layer Offloading** \
-Qi Lin\*, ***Gangqi Huang\****, Te Guo, Chang Guo, Viraj Thakkar, Zichen Zhu, Jianguo Wang, Zhichao Cao \
+Qi Lin, ***Gangqi Huang***, Te Guo, Chang Guo, Viraj Thakkar, Zichen Zhu, Jianguo Wang, Zhichao Cao \
 Accepted by International Conference on Management of Data (SIGMOD) 2026. \
-To appear, 2026.2
+[[SIGMOD26]](https://dl.acm.org/doi/abs/10.1145/3802093), 2026.2
